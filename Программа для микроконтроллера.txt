@@ -1,0 +1,182 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <TinyGPS++.h>
+#include <HardwareSerial.h>
+
+// Конфигурация Wi-Fi
+const char* ssid = "***";
+const char* password = "***";
+
+// Webhook Make.com
+const char* makeWebhookURL = "https://hook.us2.make.com/***";
+
+// Пин кнопки
+const int buttonPin = 16;
+
+// Для отслеживания состояния кнопки
+bool lastButtonState = HIGH;
+bool buttonPressed = false;
+unsigned long lastDebounceTime = 0;
+unsigned long debounceDelay = 50;
+
+// GPS объекты
+HardwareSerial SerialGPS(2);
+TinyGPSPlus gps;
+
+// Переменные для хранения координат
+float latitude = 0.0;
+float longitude = 0.0;
+bool gpsValid = false;
+
+void setup() {
+  Serial.begin(115200);
+  SerialGPS.begin(9600, SERIAL_8N1, 5, 17);
+  
+  // Настройка пина кнопки с внутренней подтяжкой к питанию
+  pinMode(buttonPin, INPUT_PULLUP);
+  
+  // Установка мощности Wi-Fi
+  WiFi.setTxPower(WIFI_POWER_19_5dBm);
+  
+  // Подключение к Wi-Fi
+  connectToWiFi();
+  
+  Serial.println("GPS Module - Location Data");
+  Serial.println("==========================");
+}
+
+void loop() {
+  // Чтение GPS данных
+  while (SerialGPS.available() > 0) {
+    if (gps.encode(SerialGPS.read())) {
+      updateGPSData();
+    }
+  }
+  
+  // Чтение состояния кнопки с обработкой дребезга
+  int reading = digitalRead(buttonPin);
+  
+  if (reading != lastButtonState) {
+    lastDebounceTime = millis();
+  }
+  
+  if ((millis() - lastDebounceTime) > debounceDelay) {
+    if (reading == LOW && !buttonPressed) {
+      buttonPressed = true;
+      Serial.println("Кнопка нажата!");
+      delay(8000);
+      
+      // Отправка запроса к Make.com
+      if (gpsValid) {
+        sendToMakeWebhook();
+      } else {
+        Serial.println("GPS данные невалидны, отправка отменена");
+      }
+    }
+    
+    if (reading == HIGH) {
+      buttonPressed = false;
+    }
+  }
+  
+  lastButtonState = reading;
+  
+  // Проверка соединения Wi-Fi
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Соединение Wi-Fi разорвано. Переподключаемся...");
+    connectToWiFi();
+  }
+  
+  delay(10);
+}
+
+void updateGPSData() {
+  static unsigned long lastUpdate = 0;
+  if (millis() - lastUpdate >= 1000) {
+    lastUpdate = millis();
+    
+    if (gps.location.isValid()) {
+      latitude = gps.location.lat();
+      longitude = gps.location.lng();
+      gpsValid = true;
+      
+      Serial.print("Latitude: ");
+      Serial.print(latitude, 6);
+      Serial.print("°, Longitude: ");
+      Serial.print(longitude, 6);
+      Serial.print("° | Satellites: ");
+      Serial.print(gps.satellites.value());
+      Serial.print(" | HDOP: ");
+      Serial.print(gps.hdop.hdop(), 1);
+      Serial.print(" | Altitude: ");
+      Serial.print(gps.altitude.meters());
+      Serial.println("m");
+    } else {
+      gpsValid = false;
+      Serial.println("Waiting for GPS signal...");
+    }
+  }
+}
+
+void connectToWiFi() {
+  Serial.print("Подключение к Wi-Fi");
+  WiFi.begin(ssid, password);
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nПодключено к Wi-Fi!");
+    Serial.print("IP адрес: ");
+    Serial.println(WiFi.localIP());
+    Serial.print("Мощность передачи Wi-Fi: ");
+    Serial.println(WiFi.getTxPower());
+  } else {
+    Serial.println("\nНе удалось подключиться к Wi-Fi");
+  }
+}
+
+void sendToMakeWebhook() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Ошибка: нет подключения к Wi-Fi");
+    return;
+  }
+  
+  HTTPClient http;
+  
+  // Формируем JSON с координатами GPS
+  String jsonPayload = "{\"lat\":" + String(latitude, 6) + 
+                       ", \"lng\":" + String(longitude, 6) + "}"; 
+  
+  // Начинаем HTTP-соединение
+  http.begin(makeWebhookURL);
+  http.addHeader("Content-Type", "application/json");
+  
+  Serial.println("Отправка запроса к Make.com...");
+  Serial.println("URL: " + String(makeWebhookURL));
+  Serial.println("Данные: " + jsonPayload);
+  
+  // Отправляем POST-запрос с JSON-телом
+  int httpResponseCode = http.POST(jsonPayload);
+  
+  // Проверяем ответ
+  if (httpResponseCode > 0) {
+    Serial.print("Код ответа: ");
+    Serial.println(httpResponseCode);
+    
+    String response = http.getString();
+    Serial.print("Ответ от сервера: ");
+    Serial.println(response);
+  } else {
+    Serial.print("Ошибка при отправке запроса: ");
+    Serial.println(httpResponseCode);
+    Serial.println(http.errorToString(httpResponseCode));
+  }
+  
+  // Закрываем соединение
+  http.end();
+}
